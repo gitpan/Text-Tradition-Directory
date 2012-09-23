@@ -1,3 +1,4 @@
+CHANGES
 inc/Module/Install.pm
 inc/Module/Install/Base.pm
 inc/Module/Install/Can.pm
@@ -25,11 +26,9 @@ t/data/load-save-benchmark.json
 t/data/simple.dot
 t/data/simple.txt
 t/data/speed_test_load.sql
+t/inline2test.conf
 t/load-save-speed.t
 t/text_tradition_directory.t
 t/text_tradition_user.t
 t/text_tradition_user_collapse.t
 t/userrestore.t
-t/var/persistence.db
-t/var/speed_test_load.db
-t/var/speed_test_save.db

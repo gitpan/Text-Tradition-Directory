@@ -20,7 +20,7 @@ use Text::Tradition::TypeMap::Entry;
 extends 'KiokuX::Model';
 
 use vars qw/ $VERSION /;
-$VERSION = "1.0";
+$VERSION = "1.1";
 
 =head1 NAME
 
@@ -193,7 +193,9 @@ ok( $nt->$_isa('Text::Tradition'), "Made new tradition" );
 	is( scalar $f->traditionlist, 1, "Object is deleted from index" );
 }
 
-{
+TODO: {
+	todo_skip "Deletion conflicts with Analysis package", 2
+		if $t->does('Text::Tradition::HasStemma');
 	my $g = Text::Tradition::Directory->new( 'dsn' => $dsn );
 	my $scope = $g->new_scope;
 	is( scalar $g->traditionlist, 1, "Now one object in new directory index" );
@@ -456,7 +458,7 @@ sub _extract_openid_data {
 
 =head2 find_user( $userinfo )
 
-Takes a hashref of C<username>, and possibly openIDish results from
+Takes a hashref of C<username> or C<email>, and possibly openIDish results from
 L<Net::OpenID::Consumer>.
 
 Fetches the user object for the given username and returns it.
@@ -466,19 +468,27 @@ Fetches the user object for the given username and returns it.
 sub find_user {
     my ($self, $userinfo) = @_;
 
-    ## No username means probably an OpenID based user
-    if(!exists $userinfo->{username}) {
+    ## A URL field means probably an OpenID based user
+    if( exists $userinfo->{url} ) {
         _extract_openid_data($userinfo);
     }
 
-    my $username = $userinfo->{username};
-
-    ## No logins if user is deactivated (use lookup to fetch to re-activate)
-    my $user = $self->lookup(Text::Tradition::User->id_for_user($username));
-    return if(!$user || !$user->active);
-
+	my $user;
+	if( exists $userinfo->{username} ) {
+    	my $username = $userinfo->{username};
+		## No logins if user is deactivated (use lookup to fetch to re-activate)
+		$user = $self->lookup(Text::Tradition::User->id_for_user($username));
+		## If there is an inactive user, skip it
+		return if( $user && !$user->active );
+	} elsif( exists $userinfo->{email} ) {
+		## Scan the users looking for a matching email
+		my @matches;
+		$self->scan( sub { push( @matches, @_ ) 
+			if $_[0]->isa('Text::Tradition::User') 
+			&& $_[0]->email eq $userinfo->{email} } );
+		$user = shift @matches;
+	}
 #    print STDERR "Found user, $username, email is :", $user->email, ":\n";
-
     return $user;
 }
 
