@@ -19,6 +19,7 @@ my $file = $fh->filename;
 $fh->close;
 my $dsn = "dbi:SQLite:dbname=$file";
 my $uuid;
+my $user = 'user@example.org';
 my $t = Text::Tradition->new( 
 	'name'  => 'inline', 
 	'input' => 'Tabular',
@@ -34,6 +35,12 @@ my $stemma_enabled = $t->can( 'add_stemma' );
 	my $scope = $d->new_scope;
 	$uuid = $d->save( $t );
 	ok( $uuid, "Saved test tradition" );
+	
+	# Add a test user
+	my $user = $d->add_user({ username => $user, password => 'UserPass' }); 
+	$user->add_tradition( $t );
+	$d->store( $user );
+	is( $t->user, $user, "Assigned tradition to test user" );
 	
 	SKIP: {
 		skip "Analysis package not installed", 5 unless $stemma_enabled;
@@ -79,27 +86,35 @@ ok( $nt->$_isa('Text::Tradition'), "Made new tradition" );
 			is( $e->ident, 'database error', "Got exception trying to fetch stemma directly" );
 			like( $e->message, qr/not a Text::Tradition/, "Exception has correct message" );
 		}
-		try {
-			$f->delete( $sid );
-		} catch( Text::Tradition::Error $e ) {
-			is( $e->ident, 'database error', "Got exception trying to delete stemma directly" );
-			like( $e->message, qr/Cannot directly delete non-Tradition object/, 
-				"Exception has correct message" );
+		if( $ENV{TEST_DELETION} ) {
+			try {
+				$f->delete( $sid );
+			} catch( Text::Tradition::Error $e ) {
+				is( $e->ident, 'database error', "Got exception trying to delete stemma directly" );
+				like( $e->message, qr/Cannot directly delete non-Tradition object/, 
+					"Exception has correct message" );
+			}
 		}
 	}
 	
-	$f->delete( $uuid );
-	ok( !$f->exists( $uuid ), "Object is deleted from DB" );
-	ok( !$f->exists( $sid ), "Object stemma also deleted from DB" ) if $stemma_enabled;
-	is( scalar $f->traditionlist, 1, "Object is deleted from index" );
+	SKIP: {
+		skip "Set TEST_DELETION in env to test DB deletion functionality", 3
+			unless $ENV{TEST_DELETION};
+		$f->delete( $uuid );
+		ok( !$f->exists( $uuid ), "Object is deleted from DB" );
+		ok( !$f->exists( $sid ), "Object stemma also deleted from DB" ) if $stemma_enabled;
+		is( scalar $f->traditionlist, 1, "Object is deleted from index" );
+	}
 }
 
-TODO: {
-	todo_skip "Deletion conflicts with Analysis package", 2
-		if $t->does('Text::Tradition::HasStemma');
+{
 	my $g = Text::Tradition::Directory->new( 'dsn' => $dsn );
 	my $scope = $g->new_scope;
-	is( scalar $g->traditionlist, 1, "Now one object in new directory index" );
+	SKIP: {
+		skip "Set TEST_DELETION in env to test DB deletion functionality", 1
+			unless $ENV{TEST_DELETION};
+		is( scalar $g->traditionlist, 1, "Now one object in new directory index" );
+	}
 	my $ntobj = $g->tradition( 'CX' );
 	my @w1 = sort { $a->sigil cmp $b->sigil } $ntobj->witnesses;
 	my @w2 = sort{ $a->sigil cmp $b->sigil } $nt->witnesses;

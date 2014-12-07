@@ -4,7 +4,7 @@ use strict;
 use warnings;
 use Moose;
 use DBI;
-use Encode qw/ decode_utf8 /;
+use Encode qw/ encode decode_utf8 /;
 use KiokuDB::GC::Naive;
 use KiokuDB::TypeMap;
 use KiokuDB::TypeMap::Entry::Naive;
@@ -20,7 +20,7 @@ use Text::Tradition::TypeMap::Entry;
 extends 'KiokuX::Model';
 
 use vars qw/ $VERSION /;
-$VERSION = "1.1";
+$VERSION = "1.2";
 
 =head1 NAME
 
@@ -118,6 +118,7 @@ my $file = $fh->filename;
 $fh->close;
 my $dsn = "dbi:SQLite:dbname=$file";
 my $uuid;
+my $user = 'user@example.org';
 my $t = Text::Tradition->new( 
 	'name'  => 'inline', 
 	'input' => 'Tabular',
@@ -133,6 +134,12 @@ my $stemma_enabled = $t->can( 'add_stemma' );
 	my $scope = $d->new_scope;
 	$uuid = $d->save( $t );
 	ok( $uuid, "Saved test tradition" );
+	
+	# Add a test user
+	my $user = $d->add_user({ username => $user, password => 'UserPass' }); 
+	$user->add_tradition( $t );
+	$d->store( $user );
+	is( $t->user, $user, "Assigned tradition to test user" );
 	
 	SKIP: {
 		skip "Analysis package not installed", 5 unless $stemma_enabled;
@@ -178,27 +185,35 @@ ok( $nt->$_isa('Text::Tradition'), "Made new tradition" );
 			is( $e->ident, 'database error', "Got exception trying to fetch stemma directly" );
 			like( $e->message, qr/not a Text::Tradition/, "Exception has correct message" );
 		}
-		try {
-			$f->delete( $sid );
-		} catch( Text::Tradition::Error $e ) {
-			is( $e->ident, 'database error', "Got exception trying to delete stemma directly" );
-			like( $e->message, qr/Cannot directly delete non-Tradition object/, 
-				"Exception has correct message" );
+		if( $ENV{TEST_DELETION} ) {
+			try {
+				$f->delete( $sid );
+			} catch( Text::Tradition::Error $e ) {
+				is( $e->ident, 'database error', "Got exception trying to delete stemma directly" );
+				like( $e->message, qr/Cannot directly delete non-Tradition object/, 
+					"Exception has correct message" );
+			}
 		}
 	}
 	
-	$f->delete( $uuid );
-	ok( !$f->exists( $uuid ), "Object is deleted from DB" );
-	ok( !$f->exists( $sid ), "Object stemma also deleted from DB" ) if $stemma_enabled;
-	is( scalar $f->traditionlist, 1, "Object is deleted from index" );
+	SKIP: {
+		skip "Set TEST_DELETION in env to test DB deletion functionality", 3
+			unless $ENV{TEST_DELETION};
+		$f->delete( $uuid );
+		ok( !$f->exists( $uuid ), "Object is deleted from DB" );
+		ok( !$f->exists( $sid ), "Object stemma also deleted from DB" ) if $stemma_enabled;
+		is( scalar $f->traditionlist, 1, "Object is deleted from index" );
+	}
 }
 
-TODO: {
-	todo_skip "Deletion conflicts with Analysis package", 2
-		if $t->does('Text::Tradition::HasStemma');
+{
 	my $g = Text::Tradition::Directory->new( 'dsn' => $dsn );
 	my $scope = $g->new_scope;
-	is( scalar $g->traditionlist, 1, "Now one object in new directory index" );
+	SKIP: {
+		skip "Set TEST_DELETION in env to test DB deletion functionality", 1
+			unless $ENV{TEST_DELETION};
+		is( scalar $g->traditionlist, 1, "Now one object in new directory index" );
+	}
 	my $ntobj = $g->tradition( 'CX' );
 	my @w1 = sort { $a->sigil cmp $b->sigil } $ntobj->witnesses;
 	my @w2 = sort{ $a->sigil cmp $b->sigil } $nt->witnesses;
@@ -236,6 +251,12 @@ has +typemap => (
   },
 );
 
+has '_mysql_utf8_hack' => (
+	is => 'ro',
+	isa => 'Bool',
+	default => undef,
+);
+
 # Push some columns into the extra_args
 around BUILDARGS => sub {
 	my $orig = shift;
@@ -247,10 +268,20 @@ around BUILDARGS => sub {
 		$args = { @_ };
 	}
 	my @column_args;
-	if( $args->{'dsn'} =~ /^dbi/ ) { # We're using Backend::DBI
+	if( $args->{'dsn'} =~ /^dbi:(\w+):/ ) { # We're using Backend::DBI
+		my $dbtype = $1;
 		@column_args = ( 'columns',
 			[ 'name' => { 'data_type' => 'varchar', 'is_nullable' => 1 },
 			  'public' => { 'data_type' => 'bool', 'is_nullable' => 1 } ] );
+		if( $dbtype eq 'mysql' && 
+			exists $args->{extra_args}->{dbi_attrs} &&
+			$args->{extra_args}->{dbi_attrs}->{mysql_enable_utf8} ) {
+			# There is a bad interaction with MySQL in utf-8 mode.
+			# Work around it here.
+			# TODO fix the underlying storage problem
+			$args->{extra_args}->{dbi_attrs}->{mysql_enable_utf8} = undef;
+			$args->{_mysql_utf8_hack} = 1;
+		}
 	}
 	my $ea = $args->{'extra_args'};
 	if( ref( $ea ) eq 'ARRAY' ) {
@@ -333,7 +364,11 @@ sub traditionlist {
     my ($user) = @_;
 
     return $self->user_traditionlist($user) if($user);
+	return $self->_get_object_idlist( 'Text::Tradition' );
+}
 
+sub _get_object_idlist {
+	my( $self, $objclass ) = @_;
 	my @tlist;
 	# If we are using DBI, we can do it the easy way; if not, the hard way.
 	# Easy way still involves making a separate DBI connection. Ew.
@@ -345,19 +380,24 @@ sub traditionlist {
 		$connection[3]->{'sqlite_unicode'} = 1 if $dbtype eq 'SQLite';
 		$connection[3]->{'pg_enable_utf8'} = 1 if $dbtype eq 'Pg';
 		my $dbh = DBI->connect( @connection );
-		my $q = $dbh->prepare( 'SELECT id, name, public from entries WHERE class = "Text::Tradition"' );
+		my $q = $dbh->prepare( 'SELECT id, name, public from entries WHERE class = "'
+			. $objclass . '"' );
 		$q->execute();
 		while( my @row = $q->fetchrow_array ) {
-			my( $id, $name ) = @row;
-			# Horrible horrible hack
-			$name = decode_utf8( $name ) if $dbtype eq 'mysql';
+			# Horrible horrible hack. Re-convert the name to UTF-8.
+			if( $self->_mysql_utf8_hack ) {
+				# Convert the chars into a raw bytestring.
+				my $octets = encode( 'ISO-8859-1', $row[1] );
+				$row[1] = decode_utf8( $octets );
+			}
 			push( @tlist, { 'id' => $row[0], 'name' => $row[1], 'public' => $row[2] } );
 		}
 	} else {
 		$self->scan( sub { my $o = shift; 
 						   push( @tlist, { 'id' => $self->object_to_id( $o ), 
 										   'name' => $o->name,
-										   'public' => $o->public } ) } );
+										   'public' => $o->public } ) 
+								if( ref $o eq $objclass ) } );
 	}
 	return @tlist;
 }

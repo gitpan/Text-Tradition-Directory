@@ -28,6 +28,7 @@ t/data/simple.txt
 t/data/speed_test_load.sql
 t/inline2test.conf
 t/load-save-speed.t
+t/mysql_utf8.t
 t/text_tradition_directory.t
 t/text_tradition_user.t
 t/text_tradition_user_collapse.t
